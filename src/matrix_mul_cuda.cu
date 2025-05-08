@@ -1,6 +1,6 @@
 /**
  * Matrix Multiplication CUDA Implementation
- * Optimized for GPU parallel execution
+ * Optimized for GPU parallel execution with detailed timing
  */
 
  #include <cuda_runtime.h>
@@ -100,4 +100,72 @@
      cudaFree(d_A);
      cudaFree(d_B);
      cudaFree(d_C);
+ }
+ 
+ /**
+  * C++ wrapper function for CUDA matrix multiplication with detailed timing
+  * Separates memory transfer and computation times
+  * 
+  * @param h_A Host matrix A
+  * @param h_B Host matrix B
+  * @param h_C Host matrix C (result)
+  * @param size Matrix dimension
+  * @param transfer_to_time Time for host-to-device transfer (output parameter)
+  * @param compute_time Time for computation (output parameter)
+  * @param transfer_from_time Time for device-to-host transfer (output parameter)
+  */
+ extern "C" void matrix_multiply_cuda_detailed(int* h_A, int* h_B, int* h_C, int size, 
+                                              double* transfer_to_time, 
+                                              double* compute_time, 
+                                              double* transfer_from_time) {
+     int *d_A, *d_B, *d_C;  // Device pointers
+     size_t matrix_size = size * size * sizeof(int);
+     
+     // For measuring time
+     cudaEvent_t start, stop;
+     cudaEventCreate(&start);
+     cudaEventCreate(&stop);
+     float milliseconds = 0;
+     
+     // Allocate device memory
+     cudaMalloc((void**)&d_A, matrix_size);
+     cudaMalloc((void**)&d_B, matrix_size);
+     cudaMalloc((void**)&d_C, matrix_size);
+     
+     // Measure host to device transfer time
+     cudaEventRecord(start);
+     cudaMemcpy(d_A, h_A, matrix_size, cudaMemcpyHostToDevice);
+     cudaMemcpy(d_B, h_B, matrix_size, cudaMemcpyHostToDevice);
+     cudaEventRecord(stop);
+     cudaEventSynchronize(stop);
+     cudaEventElapsedTime(&milliseconds, start, stop);
+     *transfer_to_time = milliseconds / 1000.0;  // Convert to seconds
+     
+     // Set up kernel launch parameters
+     dim3 threadsPerBlock(BLOCK_SIZE, BLOCK_SIZE);
+     dim3 blocksPerGrid((size + BLOCK_SIZE - 1) / BLOCK_SIZE, 
+                        (size + BLOCK_SIZE - 1) / BLOCK_SIZE);
+     
+     // Measure computation time
+     cudaEventRecord(start);
+     matrixMulKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, size);
+     cudaEventRecord(stop);
+     cudaEventSynchronize(stop);
+     cudaEventElapsedTime(&milliseconds, start, stop);
+     *compute_time = milliseconds / 1000.0;  // Convert to seconds
+     
+     // Measure device to host transfer time
+     cudaEventRecord(start);
+     cudaMemcpy(h_C, d_C, matrix_size, cudaMemcpyDeviceToHost);
+     cudaEventRecord(stop);
+     cudaEventSynchronize(stop);
+     cudaEventElapsedTime(&milliseconds, start, stop);
+     *transfer_from_time = milliseconds / 1000.0;  // Convert to seconds
+     
+     // Clean up
+     cudaFree(d_A);
+     cudaFree(d_B);
+     cudaFree(d_C);
+     cudaEventDestroy(start);
+     cudaEventDestroy(stop);
  }

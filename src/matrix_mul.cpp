@@ -1,7 +1,7 @@
 /**
- * Matrix Multiplication - Main Implementation File
- * Contains sequential, OpenMP, and AVX implementations
- * Enhanced with proper AVX intrinsics and additional optimizations
+ * Matrix Multiplication - Optimized Implementation
+ * Contains sequential, OpenMP, AVX, ISPC and CUDA implementations
+ * Enhanced with proper AVX intrinsics and memory access optimizations
  */
 
  #include <stdio.h>
@@ -16,8 +16,8 @@
  
  // Matrix size
  #define N 1024
- #define RUNS 5  // Increased from 3 to 5 for more stable results
- #define BLOCK_SIZE 32  // Block size for cache optimization
+ #define RUNS 5             // Number of runs for stable results
+ #define BLOCK_SIZE 32      // Block size for cache optimization
  
  /**
   * Sequential version: Basic matrix multiplication
@@ -54,10 +54,10 @@
          for (int jj = 0; jj < size; jj += BLOCK_SIZE) {
              for (int kk = 0; kk < size; kk += BLOCK_SIZE) {
                  // Process each block
-                 for (int i = ii; i < min(ii + BLOCK_SIZE, size); i++) {
-                     for (int j = jj; j < min(jj + BLOCK_SIZE, size); j++) {
+                 for (int i = ii; i < ii + BLOCK_SIZE && i < size; i++) {
+                     for (int j = jj; j < jj + BLOCK_SIZE && j < size; j++) {
                          int sum = C[i * size + j]; // Load current value
-                         for (int k = kk; k < min(kk + BLOCK_SIZE, size); k++) {
+                         for (int k = kk; k < kk + BLOCK_SIZE && k < size; k++) {
                              sum += A[i * size + k] * B[k * size + j];
                          }
                          C[i * size + j] = sum; // Store updated value
@@ -89,12 +89,12 @@
          for (int jj = 0; jj < size; jj += BLOCK_SIZE) {
              for (int kk = 0; kk < size; kk += BLOCK_SIZE) {
                  // Process each block
-                 for (int i = ii; i < min(ii + BLOCK_SIZE, size); i++) {
-                     for (int j = jj; j < min(jj + BLOCK_SIZE, size); j++) {
+                 for (int i = ii; i < ii + BLOCK_SIZE && i < size; i++) {
+                     for (int j = jj; j < jj + BLOCK_SIZE && j < size; j++) {
                          int sum = C[i * size + j]; // Load current value
                          
                          // Process inner loop with good cache locality
-                         for (int k = kk; k < min(kk + BLOCK_SIZE, size); k++) {
+                         for (int k = kk; k < kk + BLOCK_SIZE && k < size; k++) {
                              sum += A[i * size + k] * B[k * size + j];
                          }
                          
@@ -124,8 +124,8 @@
  
  /**
   * Helper function to process a block of matrix multiplication with AVX
-  * @param A Row of matrix A
-  * @param B_transposed Column of matrix B (stored as row in transposed matrix)
+  * @param A_row Row of matrix A
+  * @param B_col Column of matrix B (stored as row in transposed matrix)
   * @param size Matrix dimension
   * @return Dot product of row and column
   */
@@ -213,8 +213,8 @@
      for (int ii = 0; ii < size; ii += BLOCK_SIZE) {
          for (int jj = 0; jj < size; jj += BLOCK_SIZE) {
              // Process each block
-             for (int i = ii; i < min(ii + BLOCK_SIZE, size); i++) {
-                 for (int j = jj; j < min(jj + BLOCK_SIZE, size); j++) {
+             for (int i = ii; i < ii + BLOCK_SIZE && i < size; i++) {
+                 for (int j = jj; j < jj + BLOCK_SIZE && j < size; j++) {
                      // For each element in the block, we process with AVX
                      C[i * size + j] = process_row_col_avx(&A[i * size], &B_transposed[j * size], size);
                  }
@@ -282,6 +282,12 @@
  // CUDA matrix multiplication function declaration
  extern "C" void matrix_multiply_cuda(int* A, int* B, int* C, int size);
  
+ // Extended CUDA function with detailed timing
+ extern "C" void matrix_multiply_cuda_detailed(int* A, int* B, int* C, int size, 
+                                               double* transfer_to_time, 
+                                               double* compute_time, 
+                                               double* transfer_from_time);
+ 
  /**
   * Main function - sets up matrices and runs all implementations
   */
@@ -312,9 +318,10 @@
      int *C_avx_blocked = (int*)_aligned_malloc(N * N * sizeof(int), 32);
      int *C_ispc = (int*)_aligned_malloc(N * N * sizeof(int), 32);
      int *C_cuda = (int*)_aligned_malloc(N * N * sizeof(int), 32);
+     int *C_cuda_warmup = (int*)_aligned_malloc(N * N * sizeof(int), 32);
      
      if (!A || !B || !C_seq || !C_seq_blocked || !C_omp || !C_avx || 
-         !C_avx_blocked || !C_ispc || !C_cuda) {
+         !C_avx_blocked || !C_ispc || !C_cuda || !C_cuda_warmup) {
          printf("Memory allocation failed\n");
          return -1;
      }
@@ -466,7 +473,22 @@
      }
      printf("\n");
      
-     // Test CUDA version
+     // ---- CUDA Testing ----
+     
+     // Warmup run for CUDA - perform once to initialize GPU
+     printf("Performing CUDA warmup...\n");
+     matrix_multiply_cuda(A, B, C_cuda_warmup, N);
+     
+     // Verify CUDA warmup results
+     printf("Verifying CUDA warmup results...\n");
+     if (!verify_results(C_seq, C_cuda_warmup, N)) {
+         printf("CUDA warmup results verification FAILED!\n");
+     } else {
+         printf("CUDA warmup results verification PASSED!\n");
+     }
+     
+     // Test CUDA version with standard timing (includes data transfer)
+     printf("\n1. CUDA Standard Timing (includes data transfer):\n");
      double cuda_time = 0.0;
      for (int run = 0; run < RUNS; run++) {
          memset(C_cuda, 0, N * N * sizeof(int));
@@ -482,14 +504,54 @@
      printf("CUDA Version average time: %.6f sec (Speedup: %.2fx)\n", 
             cuda_time, seq_time / cuda_time);
      
-     // Verify CUDA results
-     printf("Verifying CUDA results...\n");
-     if (!verify_results(C_seq, C_cuda, N)) {
-         printf("CUDA results verification FAILED!\n");
-     } else {
-         printf("CUDA results verification PASSED!\n");
+     // Test CUDA with detailed timing
+     printf("\n2. CUDA Detailed Timing:\n");
+     double total_transfer_to = 0.0;
+     double total_compute = 0.0;
+     double total_transfer_from = 0.0;
+     
+     for (int run = 0; run < RUNS; run++) {
+         memset(C_cuda, 0, N * N * sizeof(int));
+         
+         double transfer_to_time, compute_time, transfer_from_time;
+         
+         matrix_multiply_cuda_detailed(A, B, C_cuda, N, 
+                                       &transfer_to_time, 
+                                       &compute_time, 
+                                       &transfer_from_time);
+         
+         double total_time = transfer_to_time + compute_time + transfer_from_time;
+         
+         total_transfer_to += transfer_to_time;
+         total_compute += compute_time;
+         total_transfer_from += transfer_from_time;
+         
+         printf("CUDA Detailed (Run %d): %.6f sec\n", run + 1, total_time);
+         printf("  - Host to Device: %.6f sec (%.1f%%)\n", 
+                transfer_to_time, (transfer_to_time / total_time) * 100);
+         printf("  - Computation:    %.6f sec (%.1f%%)\n", 
+                compute_time, (compute_time / total_time) * 100);
+         printf("  - Device to Host: %.6f sec (%.1f%%)\n", 
+                transfer_from_time, (transfer_from_time / total_time) * 100);
      }
-     printf("\n");
+     
+     // Calculate averages
+     total_transfer_to /= RUNS;
+     total_compute /= RUNS;
+     total_transfer_from /= RUNS;
+     double cuda_detailed_total = total_transfer_to + total_compute + total_transfer_from;
+     
+     printf("\nCUDA Detailed average time: %.6f sec (Speedup: %.2fx)\n", 
+            cuda_detailed_total, seq_time / cuda_detailed_total);
+     printf("  - Host to Device: %.6f sec (%.1f%%)\n", 
+            total_transfer_to, (total_transfer_to / cuda_detailed_total) * 100);
+     printf("  - Computation:    %.6f sec (%.1f%%)\n", 
+            total_compute, (total_compute / cuda_detailed_total) * 100);
+     printf("  - Device to Host: %.6f sec (%.1f%%)\n", 
+            total_transfer_from, (total_transfer_from / cuda_detailed_total) * 100);
+     
+     // Compute-only speedup
+     printf("CUDA Computation-only speedup: %.2fx\n", seq_time / total_compute);
      
      // Performance comparison summary
      printf("\n=== Performance Comparison Summary ===\n");
@@ -499,7 +561,8 @@
      printf("AVX Version: %.6f sec (Speedup: %.2fx)\n", avx_time, seq_time / avx_time);
      printf("AVX Blocked Version: %.6f sec (Speedup: %.2fx)\n", avx_blocked_time, seq_time / avx_blocked_time);
      printf("ISPC Version: %.6f sec (Speedup: %.2fx)\n", ispc_time, seq_time / ispc_time);
-     printf("CUDA Version: %.6f sec (Speedup: %.2fx)\n", cuda_time, seq_time / cuda_time);
+     printf("CUDA Version (with transfer): %.6f sec (Speedup: %.2fx)\n", cuda_time, seq_time / cuda_time);
+     printf("CUDA Computation Only: %.6f sec (Speedup: %.2fx)\n", total_compute, seq_time / total_compute);
      
      // Free memory
      _aligned_free(A);
@@ -511,6 +574,7 @@
      _aligned_free(C_avx_blocked);
      _aligned_free(C_ispc);
      _aligned_free(C_cuda);
+     _aligned_free(C_cuda_warmup);
      
      return 0;
  }
